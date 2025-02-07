@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import { alphaToInfo, Country } from "../utils";
+import fetch from "node-fetch";
+import csvParser from "csv-parser";
+import stream from "stream";
 
 const app = new Hono();
 
@@ -10,11 +13,34 @@ interface Result {
     bin: number;
     vendor: string;
     type: string;
-    level: string;
-    bank: string;
-    country: string;
-    countryInfo: Country;
+    category: string;
+    issuer: string;
+    issuerPhone: string;
+    issuerUrl: string;
+    isoCode2: string;
+    isoCode3: string;
+    countryName: string;
   } | null;
+}
+
+const BIN_DB_URL = "https://raw.githubusercontent.com/venelinkochev/bin-list-data/refs/heads/master/bin-list-data.csv";
+
+async function fetchBinData() {
+  const response = await fetch(BIN_DB_URL);
+  if (!response.ok) {
+    throw new Error("Failed to fetch BIN database");
+  }
+
+  const results: any[] = [];
+  const readableStream = stream.Readable.from(await response.text());
+
+  return new Promise((resolve, reject) => {
+    readableStream
+      .pipe(csvParser())
+      .on("data", (row) => results.push(row))
+      .on("end", () => resolve(results))
+      .on("error", (error) => reject(error));
+  });
 }
 
 app.get("/:bin", async (c) => {
@@ -31,47 +57,31 @@ app.get("/:bin", async (c) => {
     return c.json({ ...meta, data });
   }
 
-  const resp = await fetch("http://bins.su/", {
-    method: "POST",
-    headers: {
-      // prettier-ignore
-      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-      "accept-language": "en-US,en;q=0.9",
-      "cache-control": "max-age=0",
-      "content-type": "application/x-www-form-urlencoded",
-      "upgrade-insecure-requests": "1",
-    },
-    body: `action=searchbins&bins=${bin}&bank=&country=`,
-  });
+  try {
+    const binList: any[] = (await fetchBinData()) as any[];
+    const binEntry = binList.find((entry) => entry.BIN === bin);
 
-  const resultArray: string[] = [];
-  const rewrite = new HTMLRewriter();
+    if (binEntry) {
+      meta.result = true;
+      meta.message = "BIN Found";
 
-  rewrite.on("#result", {
-    text: ({ text }) => {
-      if (text.trim()) resultArray.push(text.trim());
-    },
-  });
-
-  await rewrite.transform(resp).text();
-
-  if (resultArray[0] === "Total found 1 bins") {
-    meta.result = true;
-    meta.message = "BIN Found";
-
-    const country = alphaToInfo(resultArray[8]);
-
-    data = {
-      bin: Number(resultArray[7]),
-      country: country.name,
-      countryInfo: country,
-      bank: resultArray[12],
-      level: resultArray[11],
-      type: resultArray[10],
-      vendor: resultArray[9],
-    };
-  } else {
-    meta.message = "BIN Not Found";
+      data = {
+        bin: Number(binEntry.BIN),
+        vendor: binEntry.Brand,
+        type: binEntry.Type,
+        category: binEntry.Category,
+        issuer: binEntry.Issuer,
+        issuerPhone: binEntry.IssuerPhone,
+        issuerUrl: binEntry.IssuerUrl,
+        isoCode2: binEntry.isoCode2,
+        isoCode3: binEntry.isoCode3,
+        countryName: binEntry.CountryName,
+      };
+    } else {
+      meta.message = "BIN Not Found";
+    }
+  } catch (error) {
+    meta.message = "Error fetching BIN data";
   }
 
   return c.json({ ...meta, data });
